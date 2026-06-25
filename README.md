@@ -42,33 +42,6 @@ BatteryDock runs entirely on your Mac.
 - No accounts
 - No Bluetooth data leaves your device
 
-## Build From Source
-
-Requirements:
-
-- macOS 14 or newer
-- Xcode 26 or newer
-
-Run locally:
-
-```bash
-./script/build_and_run.sh
-```
-
-Create a DMG:
-
-```bash
-./script/package_dmg.sh
-```
-
-For a Gatekeeper-friendly public build, sign with a Developer ID certificate and notarize:
-
-```bash
-DEVELOPER_ID_APPLICATION="Developer ID Application: Your Name (TEAMID)" \
-NOTARY_PROFILE="your-notarytool-profile" \
-./script/package_dmg.sh
-```
-
 ## License
 
 MIT
