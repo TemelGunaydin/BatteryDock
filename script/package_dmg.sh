@@ -66,6 +66,10 @@ hdiutil create \
 
 codesign --verify --deep --strict --verbose=2 "$STAGING_DIR/$APP_NAME.app"
 
+if [[ -n "${DEVELOPER_ID_APPLICATION:-}" ]]; then
+  codesign --force --sign "$DEVELOPER_ID_APPLICATION" --timestamp "$DMG_PATH"
+fi
+
 if [[ -n "${NOTARY_PROFILE:-}" ]]; then
   xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
   xcrun stapler staple "$DMG_PATH"
