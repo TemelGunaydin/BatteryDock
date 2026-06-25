@@ -24,7 +24,7 @@ It is built for one job: click the menu bar icon, see the devices macOS exposes,
 
 Download the latest `.dmg` from the [Releases](https://github.com/TemelGunaydin/BatteryDock/releases) page, open it, then drag `BatteryDock.app` into `Applications`.
 
-The current GitHub build is not Developer ID-signed or notarized yet. If macOS blocks the first launch, right-click `BatteryDock.app` and choose `Open`.
+GitHub release builds are Developer ID-signed and notarized by Apple.
 
 ## Device Support
 
