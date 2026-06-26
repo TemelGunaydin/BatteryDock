@@ -6,6 +6,12 @@ enum BoseBMAPBatteryService {
     nonisolated private static let statusOperator: UInt8 = 0x03
     nonisolated fileprivate static let batteryBlock: UInt8 = 0x02
     nonisolated fileprivate static let batteryFunction: UInt8 = 0x02
+    nonisolated private static let failureCooldown: TimeInterval = 120
+    nonisolated private static let cacheTTL: TimeInterval = 300
+    nonisolated private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var cachedBatteryByAddress: [String: CachedBattery] = [:]
+    nonisolated(unsafe) private static var lastFailureByAddress: [String: Date] = [:]
+
     nonisolated fileprivate static let batteryCommand: [UInt8] = [
         batteryBlock,
         batteryFunction,
@@ -41,26 +47,37 @@ enum BoseBMAPBatteryService {
             return nil
         }
 
-        let channelIDs = channelCandidates(productID: productID, name: name, category: category)
+        if let cachedPercent = cachedBatteryPercent(address: address) {
+            return cachedPercent
+        }
+
+        guard shouldAttemptBatteryRead(address: address) else {
+            return nil
+        }
+
+        let channelIDs = channelCandidates(productID: productID, name: name, category: category, device: device)
         for channelID in channelIDs {
             if let percent = BoseBMAPRFCOMMReader(device: device, channelID: channelID).readBatteryPercent() {
+                cacheBatteryPercent(percent, address: address)
                 return percent
             }
         }
 
+        markBatteryReadFailure(address: address)
         return nil
     }
 
     nonisolated private static func channelCandidates(
         productID: String?,
         name: String,
-        category: String?
+        category: String?,
+        device: IOBluetoothDevice
     ) -> [BluetoothRFCOMMChannelID] {
         if let productID = parseHexID(productID), productID == 0x400C || productID == 0x4020 {
-            return [8, 2]
+            return ([8] + BoseBMAPSDPChannelResolver(device: device).channelCandidates() + [2]).uniqued()
+        } else {
+            return ([2] + BoseBMAPSDPChannelResolver(device: device).channelCandidates() + [8]).uniqued()
         }
-
-        return [2, 8]
     }
 
     nonisolated private static func parseHexID(_ rawValue: String?) -> Int? {
@@ -74,6 +91,68 @@ enum BoseBMAPBatteryService {
             .replacingOccurrences(of: "0X", with: "")
 
         return Int(trimmed, radix: 16)
+    }
+
+    nonisolated private static func cachedBatteryPercent(address: String) -> Int? {
+        let now = Date()
+
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        guard let cached = cachedBatteryByAddress[address] else {
+            return nil
+        }
+
+        if now.timeIntervalSince(cached.date) <= cacheTTL {
+            return cached.percent
+        }
+
+        cachedBatteryByAddress[address] = nil
+        return nil
+    }
+
+    nonisolated private static func shouldAttemptBatteryRead(address: String) -> Bool {
+        let now = Date()
+
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        guard let lastFailure = lastFailureByAddress[address] else {
+            return true
+        }
+
+        return now.timeIntervalSince(lastFailure) > failureCooldown
+    }
+
+    nonisolated private static func cacheBatteryPercent(_ percent: Int, address: String) {
+        cacheLock.lock()
+        cachedBatteryByAddress[address] = CachedBattery(percent: percent, date: Date())
+        lastFailureByAddress[address] = nil
+        cacheLock.unlock()
+    }
+
+    nonisolated private static func markBatteryReadFailure(address: String) {
+        cacheLock.lock()
+        lastFailureByAddress[address] = Date()
+        cacheLock.unlock()
+    }
+}
+
+private struct CachedBattery {
+    let percent: Int
+    let date: Date
+}
+
+private extension Array where Element: Hashable {
+    nonisolated func uniqued() -> [Element] {
+        var seen: Set<Element> = []
+        var result: [Element] = []
+
+        for element in self where seen.insert(element).inserted {
+            result.append(element)
+        }
+
+        return result
     }
 }
 
@@ -189,11 +268,113 @@ private final class BoseBMAPRFCOMMReader: NSObject, IOBluetoothRFCOMMChannelDele
             function == 0x02,
             op == 0x03,
             payloadLength > 0,
-            (0...100).contains(percent)
+            (1...100).contains(percent)
         else {
             return nil
         }
 
         return percent
+    }
+}
+
+private final class BoseBMAPSDPChannelResolver: NSObject {
+    nonisolated(unsafe) private let device: IOBluetoothDevice
+    nonisolated(unsafe) private var queryCompleted = false
+    nonisolated(unsafe) private var resolvedChannels: [BluetoothRFCOMMChannelID] = []
+    private let stateLock = NSLock()
+
+    nonisolated init(device: IOBluetoothDevice) {
+        self.device = device
+        super.init()
+    }
+
+    nonisolated func channelCandidates(timeout: TimeInterval = 2.0) -> [BluetoothRFCOMMChannelID] {
+        guard device.performSDPQuery(self) == kIOReturnSuccess else {
+            return []
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            stateLock.lock()
+            let isComplete = queryCompleted
+            stateLock.unlock()
+
+            if isComplete {
+                break
+            }
+
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        stateLock.lock()
+        let channels = resolvedChannels
+        stateLock.unlock()
+
+        return channels
+    }
+
+    nonisolated func sdpQueryComplete(_ device: IOBluetoothDevice!, status: IOReturn) {
+        var channels: [BluetoothRFCOMMChannelID] = []
+
+        if status == kIOReturnSuccess, let device {
+            channels.append(contentsOf: channelsForUUID(bmapUUID, device: device))
+            channels.append(contentsOf: channelsForUUID(serialPortProfileUUID, device: device))
+        }
+
+        stateLock.lock()
+        resolvedChannels = channels.uniqued()
+        queryCompleted = true
+        stateLock.unlock()
+    }
+
+    nonisolated private func channelsForUUID(
+        _ uuid: IOBluetoothSDPUUID?,
+        device: IOBluetoothDevice
+    ) -> [BluetoothRFCOMMChannelID] {
+        guard let uuid else {
+            return []
+        }
+
+        if let service = device.getServiceRecord(for: uuid),
+           let channelID = rfcommChannelID(for: service) {
+            return [channelID]
+        }
+
+        let matchingServices = (device.services as? [IOBluetoothSDPServiceRecord] ?? [])
+            .filter { service in
+                service.attributes.description.lowercased().contains(uuid.description.lowercased())
+            }
+
+        return matchingServices.compactMap(rfcommChannelID)
+    }
+
+    nonisolated private func rfcommChannelID(for service: IOBluetoothSDPServiceRecord) -> BluetoothRFCOMMChannelID? {
+        var channelID = BluetoothRFCOMMChannelID(0)
+        guard service.getRFCOMMChannelID(&channelID) == kIOReturnSuccess else {
+            return nil
+        }
+
+        return channelID
+    }
+
+    nonisolated private var bmapUUID: IOBluetoothSDPUUID? {
+        let bytes: [UInt8] = [
+            0x00, 0x00, 0x00, 0x00,
+            0xde, 0xca, 0xfa, 0xde,
+            0xde, 0xca, 0xde, 0xaf,
+            0xde, 0xca, 0xca, 0xff
+        ]
+
+        return bytes.withUnsafeBytes { pointer in
+            guard let baseAddress = pointer.baseAddress else {
+                return nil
+            }
+
+            return IOBluetoothSDPUUID(bytes: baseAddress, length: bytes.count)
+        }
+    }
+
+    nonisolated private var serialPortProfileUUID: IOBluetoothSDPUUID? {
+        IOBluetoothSDPUUID(uuid16: 0x1101)
     }
 }
