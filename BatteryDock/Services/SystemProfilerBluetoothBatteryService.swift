@@ -56,17 +56,29 @@ struct SystemProfilerBluetoothBatteryService: Sendable {
 
         let devices = try parseDevices(from: output)
         let fallbackPercentByAddress = ioRegistryBatteryPercentByAddress()
+        let bosePercentByAddress = boseBMAPBatteryPercentByAddress(for: devices)
 
-        guard !fallbackPercentByAddress.isEmpty else {
+        guard !fallbackPercentByAddress.isEmpty || !bosePercentByAddress.isEmpty else {
             return devices
         }
 
         return devices.map { device in
             guard
                 device.readings.isEmpty,
-                let address = normalizedBluetoothAddress(device.address),
-                let percent = fallbackPercentByAddress[address]
+                let address = normalizedBluetoothAddress(device.address)
             else {
+                return device
+            }
+
+            let readingID: String
+            let percent: Int
+            if let fallbackPercent = fallbackPercentByAddress[address] {
+                readingID = "ioRegistryBatteryPercent"
+                percent = fallbackPercent
+            } else if let bosePercent = bosePercentByAddress[address] {
+                readingID = "boseBMAPBatteryPercent"
+                percent = bosePercent
+            } else {
                 return device
             }
 
@@ -75,9 +87,11 @@ struct SystemProfilerBluetoothBatteryService: Sendable {
                 name: device.name,
                 address: device.address,
                 category: device.category,
+                vendorID: device.vendorID,
+                productID: device.productID,
                 readings: [
                     BatteryReading(
-                        id: "ioRegistryBatteryPercent",
+                        id: readingID,
                         kind: .main,
                         label: "Pil",
                         percent: percent
@@ -126,6 +140,8 @@ struct SystemProfilerBluetoothBatteryService: Sendable {
                     name: name,
                     address: address,
                     category: normalizedFields["device_minorType"],
+                    vendorID: normalizedFields["device_vendorID"],
+                    productID: normalizedFields["device_productID"],
                     readings: batteryReadings(from: normalizedFields)
                 )
             }
@@ -177,12 +193,63 @@ struct SystemProfilerBluetoothBatteryService: Sendable {
         return readings
     }
 
+    private nonisolated static func boseBMAPBatteryPercentByAddress(for devices: [BluetoothBatteryDevice]) -> [String: Int] {
+        var batteriesByAddress: [String: Int] = [:]
+
+        for device in devices where device.readings.isEmpty && isPotentialBoseBMAPDevice(device) {
+            guard
+                let address = device.address,
+                let normalizedAddress = normalizedBluetoothAddress(address),
+                let percent = BoseBMAPBatteryService.batteryPercent(
+                    address: address,
+                    productID: device.productID,
+                    name: device.name,
+                    category: device.category
+                )
+            else {
+                continue
+            }
+
+            batteriesByAddress[normalizedAddress] = percent
+        }
+
+        return batteriesByAddress
+    }
+
+    private nonisolated static func isPotentialBoseBMAPDevice(_ device: BluetoothBatteryDevice) -> Bool {
+        if let productID = parseHexID(device.productID), BoseBMAPBatteryService.isKnownBMAPProduct(productID) {
+            return true
+        }
+
+        let name = device.name.lowercased()
+        let category = (device.category ?? "").lowercased()
+        let isAudioDevice = category.contains("headset")
+            || category.contains("headphone")
+            || category.contains("earbud")
+            || category.contains("speaker")
+
+        return name.contains("bose") && isAudioDevice
+    }
+
     private nonisolated static func parsePercent(_ rawValue: String) -> Int? {
         let digits = rawValue.filter(\.isNumber)
         guard let percent = Int(digits), (0...100).contains(percent) else {
             return nil
         }
         return percent
+    }
+
+    private nonisolated static func parseHexID(_ rawValue: String?) -> Int? {
+        guard let rawValue else {
+            return nil
+        }
+
+        let trimmed = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "0x", with: "")
+            .replacingOccurrences(of: "0X", with: "")
+
+        return Int(trimmed, radix: 16)
     }
 
     private nonisolated static func ioRegistryBatteryPercentByAddress() -> [String: Int] {

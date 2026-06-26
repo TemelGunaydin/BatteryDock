@@ -5,6 +5,8 @@ struct BluetoothBatteryDevice: Identifiable, Equatable, Sendable {
     let name: String
     let address: String?
     let category: String?
+    let vendorID: String?
+    let productID: String?
     let readings: [BatteryReading]
 
     var primaryPercent: Int? {
